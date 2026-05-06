@@ -74,6 +74,13 @@ def lowerBinOp : SVBinOp → Operator
   | .add    => .add
   | .sub    => .sub
   | .mul    => .mul
+  -- Div/mod are not lowered to hardware. Constant cases are intercepted in
+  -- lowerExpr via svExprToNat constant-folding before reaching this function.
+  -- Non-constant uses (e.g., real hardware divider) are unsupported by Sparkle's
+  -- IR; the placeholder below would produce wrong results, so lowerExpr panics
+  -- before falling through.
+  | .div    => .mul   -- unreachable: handled in lowerExpr
+  | .mod    => .mul   -- unreachable: handled in lowerExpr
   | .bitAnd => .and
   | .bitOr  => .or
   | .bitXor => .xor
@@ -126,6 +133,12 @@ private partial def svExprToNat : SVExpr → Option Nat
   | .binary .add a b => do let va ← svExprToNat a; let vb ← svExprToNat b; some (va + vb)
   | .binary .sub a b => do let va ← svExprToNat a; let vb ← svExprToNat b; some (va - vb)
   | .binary .mul a b => do let va ← svExprToNat a; let vb ← svExprToNat b; some (va * vb)
+  | .binary .div a b => do
+      let va ← svExprToNat a; let vb ← svExprToNat b
+      if vb == 0 then none else some (va / vb)
+  | .binary .mod a b => do
+      let va ← svExprToNat a; let vb ← svExprToNat b
+      if vb == 0 then none else some (va % vb)
   | .unary .neg a => do let va ← svExprToNat a; some (0 - va)
   | _ => none
 
@@ -170,6 +183,16 @@ partial def lowerExpr (e : SVExpr) : Expr :=
       let shiftAmt := 32 - innerWidth
       .op .asr [.op .shl [lowered, .const (Int.ofNat shiftAmt) 32], .const (Int.ofNat shiftAmt) 32]
   | .unary op arg => .op (lowerUnaryOp op) [lowerExpr arg]
+  | .binary .div lhs rhs =>
+    -- Division is constant-only. Constant-fold via svExprToNat or fail loudly.
+    match svExprToNat (.binary .div lhs rhs) with
+    | some n => .const (Int.ofNat n) 32
+    | none => panic! "sparkle: division in non-constant context (only parameter constant-folding is supported)"
+  | .binary .mod lhs rhs =>
+    -- Modulo is constant-only.
+    match svExprToNat (.binary .mod lhs rhs) with
+    | some n => .const (Int.ofNat n) 32
+    | none => panic! "sparkle: modulo in non-constant context (only parameter constant-folding is supported)"
   | .binary .neq lhs rhs => .op .not [.op .eq [lowerExpr lhs, lowerExpr rhs]]
   | .binary .logAnd lhs rhs =>
     -- Logical AND: a && b → (a != 0) & (b != 0) — must reduce multi-bit operands to bool
@@ -1035,6 +1058,26 @@ partial def evalConstExpr (paramVals : List (String × Nat)) : SVExpr → Option
   | .lit (.hex _ v) => some v
   | .lit (.binary _ v) => some v
   | .ident name => paramVals.find? (·.1 == name) |>.map (·.2)
+  | .binary .add a b => do
+    let va ← evalConstExpr paramVals a
+    let vb ← evalConstExpr paramVals b
+    some (va + vb)
+  | .binary .sub a b => do
+    let va ← evalConstExpr paramVals a
+    let vb ← evalConstExpr paramVals b
+    some (va - vb)
+  | .binary .mul a b => do
+    let va ← evalConstExpr paramVals a
+    let vb ← evalConstExpr paramVals b
+    some (va * vb)
+  | .binary .div a b => do
+    let va ← evalConstExpr paramVals a
+    let vb ← evalConstExpr paramVals b
+    if vb == 0 then none else some (va / vb)
+  | .binary .mod a b => do
+    let va ← evalConstExpr paramVals a
+    let vb ← evalConstExpr paramVals b
+    if vb == 0 then none else some (va % vb)
   | .binary .logOr a b => do
     let va ← evalConstExpr paramVals a
     let vb ← evalConstExpr paramVals b
@@ -1052,23 +1095,24 @@ partial def evalConstExpr (paramVals : List (String × Nat)) : SVExpr → Option
     some (if va == 0 then 1 else 0)
   | _ => none
 
-/-- Extract parameter default values as (name, value) pairs -/
+/-- Extract parameter default values as (name, value) pairs.
+    Processes parameters in declaration order so each parameter's default
+    can reference earlier parameters via `evalConstExpr`. Non-resolvable
+    defaults (e.g., depending on a not-yet-folded later parameter, or using
+    unsupported syntax) are filtered out — same fallback behavior as the
+    pre-2026-05-06 implementation, which only accepted literals. -/
 def extractParamDefaults (svMod : SVModule) : List (String × Nat) :=
-  let fromParams := svMod.params.filterMap fun p =>
-    match p.value with
-    | .lit (.decimal _ v) => some (p.name, v)
-    | .lit (.hex _ v) => some (p.name, v)
-    | .lit (.binary _ v) => some (p.name, v)
-    | _ => none
-  let fromItems := svMod.items.filterMap fun item =>
+  let acc1 := svMod.params.foldl (fun acc p =>
+    match evalConstExpr acc p.value with
+    | some v => acc ++ [(p.name, v)]
+    | none => acc) ([] : List (String × Nat))
+  let acc2 := svMod.items.foldl (fun acc item =>
     match item with
-    | .paramDecl p => match p.value with
-      | .lit (.decimal _ v) => some (p.name, v)
-      | .lit (.hex _ v) => some (p.name, v)
-      | .lit (.binary _ v) => some (p.name, v)
-      | _ => none
-    | _ => none
-  fromParams ++ fromItems
+    | .paramDecl p => match evalConstExpr acc p.value with
+      | some v => acc ++ [(p.name, v)]
+      | none => acc
+    | _ => acc) acc1
+  acc2
 
 /-- Substitute parameter references with constant values in SV expressions -/
 partial def substParamExpr (params : List (String × SVExpr)) : SVExpr → SVExpr

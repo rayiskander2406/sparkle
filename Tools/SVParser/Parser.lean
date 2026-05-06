@@ -221,7 +221,13 @@ partial def parseMul : P SVExpr := do
   while cont do
     match ← attempt (token (matchStr "*")) with
     | some _ => let rhs ← parseUnary; e := SVExpr.binary .mul e rhs
-    | none => cont := false
+    | none =>
+      match ← attempt (token (matchStr "/")) with
+      | some _ => let rhs ← parseUnary; e := SVExpr.binary .div e rhs
+      | none =>
+        match ← attempt (token (matchStr "%")) with
+        | some _ => let rhs ← parseUnary; e := SVExpr.binary .mod e rhs
+        | none => cont := false
   pure e
 
 partial def parseUnary : P SVExpr := do

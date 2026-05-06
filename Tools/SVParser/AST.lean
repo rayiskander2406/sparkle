@@ -32,6 +32,8 @@ inductive SVUnaryOp where
 inductive SVBinOp where
   -- Arithmetic
   | add | sub | mul
+  -- Constant-only arithmetic (handled at parameter-folding time, not lowered to hardware)
+  | div | mod
   -- Bitwise
   | bitAnd | bitOr | bitXor
   -- Shift
