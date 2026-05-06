@@ -20,9 +20,78 @@ namespace Tools.SVParser.Parser
 -- and remove `timescale, `define, `default_nettype, (* attributes *)
 -- ============================================================================
 
+/-- QANARY: strip `function automatic ... endfunction` blocks.
+    Walks line-by-line; when a line starts with `function`, drops every
+    line up to and including `endfunction`. Conservative — any nested
+    `function`/`endfunction` would confuse this; sv2v output doesn't nest. -/
+private def stripFunctionDefs (input : String) : String := Id.run do
+  let lines := input.splitOn "\n"
+  let mut result : List String := []
+  let mut inFunc := false
+  for line in lines do
+    let t := line.trimLeft
+    if t.startsWith "function " || t.startsWith "function\t" || t.startsWith "function automatic" then
+      inFunc := true
+    else if inFunc && (t.startsWith "endfunction") then
+      inFunc := false
+    else if inFunc then
+      pure ()  -- drop
+    else
+      result := result ++ [line]
+  "\n".intercalate result
+
+/-- QANARY: rewrite `sv2v_cast_NAME(expr)` → `(expr)`.
+    sv2v emits these as width-cast helpers; after stripFunctionDefs the
+    NAME has no definition, so we strip both the prefix and the identifier
+    that follows, leaving the parenthesized argument. -/
+private partial def rewriteSv2vCasts (input : String) : String := Id.run do
+  let mut s := input
+  let mut out := ""
+  let mut cont := true
+  while cont do
+    match s.splitOn "sv2v_cast_" with
+    | [only] => out := out ++ only; cont := false
+    | before :: rest =>
+      let after := "sv2v_cast_".intercalate rest
+      -- Skip the identifier (alphanumeric/underscore chars after the prefix)
+      let mut idx : Nat := 0
+      let arr := after.toList
+      let len := arr.length
+      let chars := arr.toArray
+      while idx < len && (chars[idx]!.isAlphanum || chars[idx]! == '_') do
+        idx := idx + 1
+      if idx < len && chars[idx]! == '(' then
+        out := out ++ before
+        s := (after.drop idx).toString
+      else
+        -- not a call site, preserve verbatim and continue
+        out := out ++ before ++ "sv2v_cast_"
+        s := after
+    | [] => cont := false
+  out
+
 /-- Simple preprocessor: remove ifdef blocks (keeping else branch),
     strip `timescale/`define/`default_nettype directives and (* ... *) attributes -/
 def preprocess (input : String) : String := Id.run do
+  -- QANARY: normalize `@(*)` → `@*` BEFORE attribute-stripping. The
+  -- `removeAttributes` helper greedily matches `(* ... *)` including
+  -- the `(*` inside `@(*)`, which would silently corrupt the always-block
+  -- to `@` (followed by whatever the line continues with). Doing the
+  -- substitution up front avoids the collision. Original substitution
+  -- at end of function preserved as a defense in depth for tools that
+  -- emit the form differently.
+  let input := "@*".intercalate (input.splitOn "@(*)")
+  -- QANARY: strip `function automatic ... endfunction` blocks. sv2v emits
+  -- these for SystemVerilog width casts (`sv2v_cast_NAME(expr)`). For our
+  -- purposes — formal verification of arithmetic invariants — the casts
+  -- are width-adjusting no-ops and can be safely removed by replacing the
+  -- call site with the bare expression. Function definitions are dropped
+  -- entirely; call sites get rewritten by the next pass.
+  let input := stripFunctionDefs input
+  -- QANARY: rewrite `sv2v_cast_NAME(expr)` → `(expr)`. After def-stripping
+  -- the names are dangling references; this pass replaces them with their
+  -- argument, which is semantically equivalent for width-cast helpers.
+  let input := rewriteSv2vCasts input
   let lines := input.splitOn "\n"
   let mut result : List String := []
   let mut ifdefDepth : Nat := 0
