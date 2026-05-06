@@ -85,7 +85,12 @@ inductive SVPortDir where
 structure SVPort where
   dir    : SVPortDir
   isReg  : Bool := false            -- output reg
-  width  : Option (Nat × Nat)       -- [hi:lo] or none for 1-bit
+  width  : Option (Nat × Nat)       -- [hi:lo] or none for 1-bit; eagerly evaluated literals
+  -- Deferred SVExpr form of the bit range, captured when the range references
+  -- identifiers (parameters). lowerModule re-evaluates this against folded
+  -- paramVals and overrides `width`. Defaults to none for back-compat with
+  -- the literal lex-time `bitRange` path.
+  widthExpr : Option (SVExpr × SVExpr) := none
   name   : String
   deriving Repr, BEq
 

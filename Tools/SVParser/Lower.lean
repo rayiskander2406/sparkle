@@ -1353,6 +1353,20 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
     | none => p
   let svMod := { svMod with items := expandedItems, params := svParams }
 
+  -- Pivot 2 PoC: re-evaluate port widths whose source contains
+  -- parameter references. parseOptWidthExpr captures the SVExpr form
+  -- of `[hi:lo]`; here we resolve those expressions using folded paramVals.
+  -- If both endpoints fold to Nats, we override the (31, 0) placeholder
+  -- with the real value. Otherwise we leave the placeholder.
+  let resolvedPorts := svMod.ports.map fun p =>
+    match p.widthExpr with
+    | none => p  -- literal width already set by lex-time bitRange
+    | some (hiExpr, loExpr) =>
+      match evalConstExpr paramVals hiExpr, evalConstExpr paramVals loExpr with
+      | some hi, some lo => { p with width := some (hi, lo) }
+      | _, _ => p
+  let svMod := { svMod with ports := resolvedPorts }
+
   -- Build environment
   let mut env := LowerEnv.empty
   for p in svMod.ports do

@@ -472,16 +472,37 @@ def parseOptWidth : P (Option (Nat × Nat)) := do
   match ← attempt bitRange with
   | some r => pure (some r) | none => pure none
 
-/-- Parse a port: direction [reg] [width] name -/
+/-- Parse `[hiExpr : loExpr]` using the full expression parser, NOT the
+    skip-and-default-31 lexer fallback. Returns the SVExpr forms so
+    `lowerModule` can re-evaluate them against folded paramVals.
+    This is the Pivot 2 PoC option A2 entry point. -/
+def parseOptWidthExpr : P (Option (SVExpr × SVExpr)) := do
+  match ← attempt lbracket with
+  | none => pure none
+  | some _ =>
+    let hi ← parseExpr
+    colon
+    let lo ← parseExpr
+    rbracket
+    pure (some (hi, lo))
+
+/-- Parse a port: direction [reg] [width] name. Captures both the
+    eagerly-evaluated literal width (back-compat) AND the SVExpr form
+    of the bit range (used when paramVals are available, in lowerModule). -/
 def parsePortInList : P SVPort := do
   let dir ← parsePortDir
   let isReg ← match ← attempt (keyword "reg") with | some _ => pure true | none => pure false
   let _ ← attempt (keyword "logic")
   let _ ← attempt (keyword "wire")
   let _ ← attempt (keyword "signed")
-  let width ← parseOptWidth
+  -- Try the SVExpr-based bit-range first; if successful, derive a
+  -- conservative literal pair (31:0 default) so existing back-compat
+  -- consumers still see *some* width. lowerModule will override with
+  -- the param-folded value.
+  let widthExpr ← parseOptWidthExpr
+  let width : Option (Nat × Nat) := widthExpr.map (fun _ => (31, 0))
   let name ← identifier
-  pure { dir, isReg, width, name }
+  pure { dir, isReg, width, widthExpr, name }
 
 /-- Parse port list with direction carry-over.
     In Verilog, `input clk, resetn` means both are inputs.
@@ -493,6 +514,7 @@ def parsePortList : P (List SVPort) := do
   let mut lastDir := first.dir
   let mut lastIsReg := first.isReg
   let mut lastWidth := first.width
+  let mut lastWidthExpr := first.widthExpr
   let mut cont := true
   while cont do
     match ← attempt comma with
@@ -505,18 +527,23 @@ def parsePortList : P (List SVPort) := do
         let _ ← attempt (keyword "logic")
         let _ ← attempt (keyword "wire")
         let _ ← attempt (keyword "signed")
-        lastWidth ← parseOptWidth
+        let we ← parseOptWidthExpr
+        lastWidthExpr := we
+        lastWidth := we.map (fun _ => (31, 0))
         let name ← identifier
-        let port := { dir := lastDir, isReg := lastIsReg, width := lastWidth, name : SVPort }
+        let port := { dir := lastDir, isReg := lastIsReg, width := lastWidth,
+                      widthExpr := lastWidthExpr, name : SVPort }
         ports := ports ++ [port]
       | none =>
         -- No direction keyword — carry over from previous
         let _ ← attempt (keyword "signed")
-        -- Check for new width override
-        let width ← parseOptWidth
-        let w := if width.isSome then width else lastWidth
+        -- Check for new width override (Pivot 2 PoC path)
+        let we ← parseOptWidthExpr
+        let widthExpr := if we.isSome then we else lastWidthExpr
+        let width : Option (Nat × Nat) :=
+          if we.isSome then some (31, 0) else lastWidth
         let name ← identifier
-        let port := { dir := lastDir, isReg := lastIsReg, width := w, name : SVPort }
+        let port := { dir := lastDir, isReg := lastIsReg, width, widthExpr, name : SVPort }
         ports := ports ++ [port]
     | none => cont := false
   rparen; pure ports
