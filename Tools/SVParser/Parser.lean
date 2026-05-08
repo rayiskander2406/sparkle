@@ -838,37 +838,59 @@ partial def parseModuleItems : P (List SVModuleItem) := do
               | some _ => parseGenerateBlock
               | none => match ← attempt (keyword "initial") with
                 | some _ =>
-                  -- Parse initial block — extract $readmemh if present
-                  keyword "begin"
-                  let mut items : List SVModuleItem := []
-                  let mut d : Nat := 1
-                  while d > 0 do
-                    -- Check for $readmemh("file", mem);
-                    match ← attempt (do
-                      let _ ← token (matchStr "$readmemh")
-                      lparen
-                      -- Parse filename string: "filename"
-                      let _ ← token (matchStr "\"")
-                      let mut filename : List Char := []
-                      let mut readingName := true
-                      while readingName do
-                        let c ← nextChar
-                        if c == '"' then readingName := false
-                        else filename := filename ++ [c]
-                      ws; comma
-                      let memName ← identifier
-                      rparen; semi
-                      pure (String.ofList filename, memName)) with
-                    | some (filename, memName) =>
-                      items := items ++ [SVModuleItem.readmemh filename memName]
+                  -- IEEE 1800-2017 §9.2.1:
+                  --   initial_construct ::= 'initial' statement_or_null
+                  -- Two grammatical forms accepted here:
+                  --   `initial begin ... end`  — block form (this branch
+                  --                              extracts $readmemh items
+                  --                              for memory init; other
+                  --                              statements are dropped).
+                  --   `initial <single_stmt>;` — single-statement form
+                  --                              (e.g., sv2v-emitted
+                  --                              `initial _sv2v_0 = 0;`).
+                  -- Initial blocks are non-synthesizable per §9.2; the parser
+                  -- treats them as parse-time no-ops except for the
+                  -- $readmemh memory-init affordance above.
+                  match ← attempt (keyword "begin") with
+                  | some _ =>
+                    -- Block form: extract $readmemh; drop other statements.
+                    let mut items : List SVModuleItem := []
+                    let mut d : Nat := 1
+                    while d > 0 do
+                      -- Check for $readmemh("file", mem);
+                      match ← attempt (do
+                        let _ ← token (matchStr "$readmemh")
+                        lparen
+                        -- Parse filename string: "filename"
+                        let _ ← token (matchStr "\"")
+                        let mut filename : List Char := []
+                        let mut readingName := true
+                        while readingName do
+                          let c ← nextChar
+                          if c == '"' then readingName := false
+                          else filename := filename ++ [c]
+                        ws; comma
+                        let memName ← identifier
+                        rparen; semi
+                        pure (String.ofList filename, memName)) with
+                      | some (filename, memName) =>
+                        items := items ++ [SVModuleItem.readmemh filename memName]
+                      | none =>
+                        let hitBegin ← attempt (keyword "begin")
+                        if hitBegin.isSome then d := d + 1
+                        else
+                          let hitEnd ← attempt (keyword "end")
+                          if hitEnd.isSome then d := d - 1
+                          else let _ ← nextChar; pure ()
+                    pure items
+                  | none =>
+                    -- Single-statement form (or empty `;`). Parse and drop —
+                    -- synthesis-irrelevant per §9.2.
+                    match ← attempt semi with
+                    | some _ => pure []  -- empty statement: `initial ;`
                     | none =>
-                      let hitBegin ← attempt (keyword "begin")
-                      if hitBegin.isSome then d := d + 1
-                      else
-                        let hitEnd ← attempt (keyword "end")
-                        if hitEnd.isSome then d := d - 1
-                        else let _ ← nextChar; pure ()
-                  pure items
+                      let _ ← parseStmt
+                      pure []
                 | none => match ← attempt (keyword "task") with
                 | some _ =>
                   let n ← identifier; semi
