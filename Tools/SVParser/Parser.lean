@@ -346,6 +346,16 @@ partial def parsePostfix (e : SVExpr) : P SVExpr := do
     ) with
     | some (base, widthExpr) => parsePostfix (SVExpr.partSelectPlus e base widthExpr)
     | none =>
+    -- Try [base -: width] descending part-select (IEEE 1800-2017 §11.5.1)
+    match ← attempt (do
+      let base ← parsePrimary
+      let _ ← token (matchStr "-:")
+      let widthExpr ← parsePrimary
+      rbracket
+      pure (base, widthExpr)
+    ) with
+    | some (base, widthExpr) => parsePostfix (SVExpr.partSelectMinus e base widthExpr)
+    | none =>
     -- Normal: [idx], [hi:lo]
     let idx ← parseExpr
     match ← attempt colon with

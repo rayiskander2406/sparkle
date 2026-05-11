@@ -146,6 +146,7 @@ private def concatWidth : SVExpr → Nat
   | .concat args => args.foldl (fun acc a => acc + concatWidth a) 0
   | .slice _ hi lo => hi - lo + 1
   | .partSelectPlus _ _ widthExpr => svExprToNat widthExpr |>.getD 1
+  | .partSelectMinus _ _ widthExpr => svExprToNat widthExpr |>.getD 1
   | .index _ _ => 1  -- single bit select
   | .lit (.decimal (some w) _) => w
   | .lit (.hex (some w) _) => w
@@ -226,6 +227,14 @@ partial def lowerExpr (e : SVExpr) : Expr :=
     let width := svExprToNat widthExpr |>.getD 1
     let mask := (1 <<< width) - 1
     .op .and [.op .shr [lowerExpr expr, lowerExpr base], .const (Int.ofNat mask) width]
+  | .partSelectMinus expr base widthExpr =>
+    -- [base -: width] = (expr >> (base - width + 1)) & ((1 << width) - 1)
+    -- IEEE 1800-2017 §11.5.1: descending part-select; base is the HIGH bit.
+    let width := svExprToNat widthExpr |>.getD 1
+    let mask := (1 <<< width) - 1
+    let shiftDelta : Nat := if width == 0 then 0 else width - 1
+    let shiftAmount := .op .sub [lowerExpr base, .const (Int.ofNat shiftDelta) 32]
+    .op .and [.op .shr [lowerExpr expr, shiftAmount], .const (Int.ofNat mask) width]
   | .concat args => .concat (args.map lowerExpr)
   | .repeat_ count value =>
     -- {N{expr}}: replicate expr N times (bit replication)
@@ -403,6 +412,12 @@ private def decomposeMultiConcatLhs (lhs : SVExpr) (rhs : SVExpr) : List (String
           | some v => v | none => 0
         let width := svExprToNat widthExpr |>.getD 1
         some (name, width, base)
+      | .partSelectMinus (.ident name) baseExpr widthExpr =>
+        -- [base -: width] LHS: low bit is (base - width + 1); Nat.sub saturates at 0.
+        let base := match svExprToNat baseExpr with
+          | some v => v | none => 0
+        let width := svExprToNat widthExpr |>.getD 1
+        some (name, width, (base + 1) - width)
       | .ident name => some (name, 32, 0)
       | _ => none
     if fields.length != elems.length then []
@@ -747,6 +762,7 @@ partial def collectBlockNamesTop (stmts : List SVStmt) : List String :=
         | .index (.ident n) _ => some n
         | .slice (.ident n) _ _ => some n
         | .partSelectPlus (.ident n) _ _ => some n
+        | .partSelectMinus (.ident n) _ _ => some n
         | _ => none
       | _ => []
   stmts.flatMap fun s => match s with
@@ -1124,6 +1140,7 @@ partial def substParamExpr (params : List (String × SVExpr)) : SVExpr → SVExp
   | .index a i => .index (substParamExpr params a) (substParamExpr params i)
   | .slice e hi lo => .slice (substParamExpr params e) hi lo
   | .partSelectPlus e base w => .partSelectPlus (substParamExpr params e) (substParamExpr params base) (substParamExpr params w)
+  | .partSelectMinus e base w => .partSelectMinus (substParamExpr params e) (substParamExpr params base) (substParamExpr params w)
   | .concat es => .concat (es.map (substParamExpr params))
   | e => e
 
@@ -1151,6 +1168,7 @@ private partial def collectReadNamesExpr : SVExpr → List String
   | .index a i => collectReadNamesExpr a ++ collectReadNamesExpr i
   | .slice e _ _ => collectReadNamesExpr e
   | .partSelectPlus e base _ => collectReadNamesExpr e ++ collectReadNamesExpr base
+  | .partSelectMinus e base _ => collectReadNamesExpr e ++ collectReadNamesExpr base
   | .concat es => es.flatMap collectReadNamesExpr
   | _ => []
 
@@ -1169,9 +1187,11 @@ private partial def collectWriteNames : List SVStmt → List String
       | .index (.ident name) _ => [name]
       | .slice (.ident name) _ _ => [name]
       | .partSelectPlus (.ident name) _ _ => [name]
+      | .partSelectMinus (.ident name) _ _ => [name]
       | .concat elems => elems.filterMap fun e => match e with
         | .ident n => some n | .index (.ident n) _ => some n
         | .slice (.ident n) _ _ => some n | .partSelectPlus (.ident n) _ _ => some n
+        | .partSelectMinus (.ident n) _ _ => some n
         | _ => none
       | _ => []
     | .ifElse _ t e => collectWriteNames t ++ collectWriteNames e
@@ -1187,6 +1207,7 @@ private partial def renameExpr (oldName newName : String) : SVExpr → SVExpr
   | .index a i => .index (renameExpr oldName newName a) (renameExpr oldName newName i)
   | .slice e hi lo => .slice (renameExpr oldName newName e) hi lo
   | .partSelectPlus e base w => .partSelectPlus (renameExpr oldName newName e) (renameExpr oldName newName base) (renameExpr oldName newName w)
+  | .partSelectMinus e base w => .partSelectMinus (renameExpr oldName newName e) (renameExpr oldName newName base) (renameExpr oldName newName w)
   | .concat es => .concat (es.map (renameExpr oldName newName))
   | e => e
 
