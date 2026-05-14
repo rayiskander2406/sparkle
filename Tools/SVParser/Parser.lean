@@ -276,8 +276,11 @@ partial def parseAdd : P SVExpr := do
   let mut e ← parseMul
   let mut cont := true
   while cont do
-    match ← attempt (token (matchStr "+")) with
-    | some _ => let rhs ← parseMul; e := SVExpr.binary .add e rhs
+    -- Attempt-wrap both `+` and `-` consumption together with their parseMul
+    -- so the operator consumption rolls back if no RHS expression follows
+    -- (e.g., when the `+` belongs to a trailing `+:` part-select separator).
+    match ← attempt (do let _ ← token (matchStr "+"); parseMul) with
+    | some rhs => e := SVExpr.binary .add e rhs
     | none =>
       match ← attempt (do let _ ← token (matchStr "-"); parseMul) with
       | some rhs => e := SVExpr.binary .sub e rhs
@@ -335,12 +338,15 @@ partial def parsePrimaryPost : P SVExpr := do
 partial def parsePostfix (e : SVExpr) : P SVExpr := do
   match ← attempt lbracket with
   | some _ =>
-    -- Try [base +: width] part-select first
-    -- Use parsePrimary (not parseExpr) for base to avoid consuming + as addition
+    -- Try [base +: width] part-select first (IEEE 1800-2017 §11.5.1).
+    -- Use parseExpr for both BASE and WIDTH (compound expressions per IEEE);
+    -- the `attempt` rolls back if the trailing `+:` doesn't match. Safety of
+    -- parseExpr here relies on parseAdd's `+` consumption being attempt-wrapped
+    -- (mirrors the `-` arm) so parseExpr stops cleanly at the `+:` separator.
     match ← attempt (do
-      let base ← parsePrimary
+      let base ← parseExpr
       let _ ← token (matchStr "+:")
-      let widthExpr ← parsePrimary
+      let widthExpr ← parseExpr
       rbracket
       pure (base, widthExpr)
     ) with
@@ -348,9 +354,9 @@ partial def parsePostfix (e : SVExpr) : P SVExpr := do
     | none =>
     -- Try [base -: width] descending part-select (IEEE 1800-2017 §11.5.1)
     match ← attempt (do
-      let base ← parsePrimary
+      let base ← parseExpr
       let _ ← token (matchStr "-:")
-      let widthExpr ← parsePrimary
+      let widthExpr ← parseExpr
       rbracket
       pure (base, widthExpr)
     ) with
