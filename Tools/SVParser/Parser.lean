@@ -424,6 +424,12 @@ partial def parsePrimary : P SVExpr := do
   | some '\'' =>
     -- Unsized literal: 'b0, 'bx, 'h0, etc.
     let _ ← token (matchStr "'")
+    -- IEEE 1800-2017 §5.7.1: optional signed marker `s`/`S` between apostrophe and base.
+    -- Parse-only coverage (Path A — drop signedness); mirrors Lexer.lean::numericLiteral.
+    let _ ← attempt (do
+      match (← peekChar) with
+      | some 's' | some 'S' => let _ ← nextChar
+      | _ => fail "no signed marker")
     let base ← nextChar
     match base with
     | 'b' | 'B' =>
@@ -438,6 +444,11 @@ partial def parsePrimary : P SVExpr := do
       skipUnderscoresAndSpaces
       let dd ← digits
       pure (SVExpr.lit (.decimal none dd.toNat!))
+    | 'o' | 'O' =>
+      -- IEEE 1800-2017 §5.7.1: octal base; parallel to Lexer.lean::numericLiteral patch.
+      skipUnderscoresAndSpaces
+      let od ← octDigitsStr
+      pure (SVExpr.lit (.decimal none (octToNat od)))
     | _ => fail s!"unexpected base '{base}' in unsized literal"
   | some c' =>
     if isDigit c' then let lit ← numericLiteral; pure (SVExpr.lit lit)

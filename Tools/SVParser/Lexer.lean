@@ -57,6 +57,7 @@ def isDigit (c : Char) : Bool := c.isDigit
 def isHexDigit (c : Char) : Bool :=
   c.isDigit || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F') || c == 'x' || c == 'X' || c == 'z' || c == 'Z'
 def isBinDigit (c : Char) : Bool := c == '0' || c == '1' || c == 'x' || c == 'X' || c == 'z' || c == 'Z'
+def isOctDigit (c : Char) : Bool := ('0' ≤ c && c ≤ '7') || c == 'x' || c == 'X' || c == 'z' || c == 'Z'
 
 -- ============================================================================
 -- Whitespace and comments
@@ -206,6 +207,20 @@ def binDigitsStr : P String := do
     | none => cont := false
   pure (String.ofList result)
 
+def octDigitsStr : P String := do
+  let first ← nextChar
+  if !isOctDigit first then fail s!"expected octal digit, got '{first}'"
+  let mut result : List Char := [first]
+  let mut cont := true
+  while cont do
+    let c ← peekChar
+    match c with
+    | some c' =>
+      if isOctDigit c' then let _ ← nextChar; result := result ++ [c']
+      else cont := false
+    | none => cont := false
+  pure (String.ofList result)
+
 def hexToNat (s : String) : Nat :=
   s.foldl (fun acc c =>
     let d := if '0' ≤ c && c ≤ '9' then c.toNat - '0'.toNat
@@ -216,6 +231,11 @@ def hexToNat (s : String) : Nat :=
 
 def binToNat (s : String) : Nat :=
   s.foldl (fun acc c => acc * 2 + if c == '1' then 1 else 0) 0  -- x/z → 0
+
+def octToNat (s : String) : Nat :=
+  s.foldl (fun acc c =>
+    let d := if '0' ≤ c && c ≤ '7' then c.toNat - '0'.toNat else 0  -- x/z → 0
+    acc * 8 + d) 0
 
 def skipUnderscoresAndSpaces : P Unit := do
   let mut cont := true
@@ -245,6 +265,13 @@ def numericLiteral : P SVLiteral := token do
   let next ← peekChar
   if next == some '\'' then
     let _ ← nextChar
+    -- IEEE 1800-2017 §5.7.1: optional signed marker `s`/`S` between apostrophe and base.
+    -- Parse-only coverage (Path A — drop signedness): Adams Bridge usage of `1'sb0` etc.
+    -- is bit-pattern equivalent to unsigned for synthesis (signed AST representation deferred).
+    let _ ← attempt (do
+      match (← peekChar) with
+      | some 's' | some 'S' => let _ ← nextChar
+      | _ => fail "no signed marker")
     let base ← nextChar
     match base with
     | 'h' | 'H' =>
@@ -258,6 +285,12 @@ def numericLiteral : P SVLiteral := token do
       skipUnderscoresAndSpaces
       let bd ← binDigitsStr
       pure (SVLiteral.binary (some d.toNat!) (binToNat bd))
+    | 'o' | 'O' =>
+      -- IEEE 1800-2017 §5.7.1: octal base; represented as decimal-valued for parse-only
+      -- coverage (faithful octal AST node deferred — no current downstream consumer).
+      skipUnderscoresAndSpaces
+      let od ← octDigitsStr
+      pure (SVLiteral.decimal (some d.toNat!) (octToNat od))
     | _ => fail s!"unknown base '{base}'"
   else
     pure (SVLiteral.decimal none d.toNat!)
