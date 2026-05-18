@@ -74,20 +74,35 @@ def collectAssigns (body : List Stmt) : List (String × Expr) :=
     | .assign name rhs => some (name, rhs)
     | _ => none
 
-/-- Recursively inline wire references with their definitions.
-    `regNames` lists register output names — these are NOT inlined
-    (they are state variables, not wires). Without this exclusion,
-    self-referencing registers cause infinite inlining loops. -/
-partial def inlineAssigns (assigns : List (String × Expr)) : Expr → Expr
+/-- Recursively inline wire references with their definitions, tracking the
+    active ref-resolution path in `visited` to cut genuine reference cycles.
+    `regNames` lists register output names — those are NOT inlined (state,
+    not wires). A name already on the active `visited` path is left symbolic
+    instead of re-inlined: this terminates the self-referential assign
+    `pk = {pk[hi:lo], ...}` that Lower.lean reconstructs for bit- or
+    part-select LHS writes to a combinational body reg. Acyclic chains
+    are unaffected
+    (siblings each receive the same incoming `visited`). -/
+partial def inlineAssignsGo (assigns : List (String × Expr))
+    (visited : List String) : Expr → Expr
   | .ref name =>
-    match assigns.find? (·.1 == name) with
-    | some (_, rhs) => inlineAssigns assigns rhs
-    | none => .ref name
-  | .op operator args => .op operator (args.map (inlineAssigns assigns))
-  | .concat args => .concat (args.map (inlineAssigns assigns))
-  | .slice e hi lo => .slice (inlineAssigns assigns e) hi lo
-  | .index a i => .index (inlineAssigns assigns a) (inlineAssigns assigns i)
+    if visited.contains name then .ref name
+    else
+      match assigns.find? (·.1 == name) with
+      | some (_, rhs) => inlineAssignsGo assigns (name :: visited) rhs
+      | none => .ref name
+  | .op operator args => .op operator (args.map (inlineAssignsGo assigns visited))
+  | .concat args => .concat (args.map (inlineAssignsGo assigns visited))
+  | .slice e hi lo => .slice (inlineAssignsGo assigns visited e) hi lo
+  | .index a i => .index (inlineAssignsGo assigns visited a) (inlineAssignsGo assigns visited i)
   | e => e  -- const passes through
+
+/-- Public entry point — original 2-arg signature preserved. Both call
+    sites (`Verify.lean` `extractModel`, `Macro.lean:43`) invoke this
+    `inlineAssigns assigns r.nextExpr` form **unchanged**. Seeds the
+    cycle-tracking accumulator empty. -/
+partial def inlineAssigns (assigns : List (String × Expr)) : Expr → Expr :=
+  inlineAssignsGo assigns []
 
 -- ============================================================================
 -- Width inference
