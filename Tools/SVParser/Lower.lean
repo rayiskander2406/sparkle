@@ -284,6 +284,23 @@ def concatLhsName : SVExpr → Option String
     | [] => none
   | _ => none
 
+/-- Gap M (Phase 2 D6-reissue-2): extract `(registerName, hi, lo)` from a
+    slice / constant part-select LHS. Dynamic base/width → `none` (out of
+    scope; not in Adams Bridge production butterflies). Uses the codebase-
+    proven `(base+1)-w` ℕ-safe low-bit form for `[base -: width]` (matches
+    `decomposeMultiConcatLhs`). -/
+def lhsBaseRange : SVExpr → Option (String × Nat × Nat)
+  | .slice (.ident n) hi lo => some (n, hi, lo)
+  | .partSelectPlus (.ident n) base width =>
+    match svExprToNat base, svExprToNat width with
+    | some b, some w => if w == 0 then none else some (n, b + w - 1, b)
+    | _, _ => none
+  | .partSelectMinus (.ident n) base width =>
+    match svExprToNat base, svExprToNat width with
+    | some b, some w => if w == 0 || w > b + 1 then none else some (n, b, (b + 1) - w)
+    | _, _ => none
+  | _ => none
+
 -- ============================================================================
 -- Register extraction from always @(posedge clk) blocks
 -- ============================================================================
@@ -348,6 +365,12 @@ structure GuardedAssign where
   guard  : Expr
   target : String
   value  : Expr
+  /-- Gap M (Phase 2 D6-reissue-2): `some (hi, lo)` if this write targets a
+      bit-range `target[hi:lo]` (slice / constant part-select LHS); `none`
+      = whole-register write (bare ident / same-register concat). Defaulted
+      ⇒ every existing `{guard,target,value}` construction compiles
+      unchanged (D-017 census: 0 edits). -/
+  slice  : Option (Nat × Nat) := none
 
 /-- Conjunction helper: true & x = x, else AND -/
 private def mkAnd (a b : Expr) : Expr :=
@@ -506,13 +529,20 @@ partial def collectGuardedNB (stmts : List SVStmt) (guard : Expr := .const 1 1)
   stmts.flatMap fun s => match s with
     | .nonblockAssign lhs rhs =>
       if isDontCare rhs then []
-      else match exprToName lhs with
-        | some name => [{ guard, target := name, value := lowerExpr rhs }]
-        | none =>
-          -- Try concat-LHS (bit-scatter) assignment
-          match lowerConcatLhsAssign lhs rhs with
-          | some (name, value) => [{ guard, target := name, value }]
-          | none => []
+      -- Gap M: slice / constant part-select LHS → tag the bit-range so the
+      -- stmtsToMuxExpr (reg,guard) merge pass can coalesce multiple slice
+      -- writes to one register into a structurally-faithful concat. Tried
+      -- BEFORE exprToName (whose .slice arm would drop the bounds).
+      else match lhsBaseRange lhs with
+        | some (n, hi, lo) =>
+          [{ guard, target := n, value := lowerExpr rhs, slice := some (hi, lo) }]
+        | none => match exprToName lhs with
+          | some name => [{ guard, target := name, value := lowerExpr rhs }]
+          | none =>
+            -- Try concat-LHS (bit-scatter) assignment
+            match lowerConcatLhsAssign lhs rhs with
+            | some (name, value) => [{ guard, target := name, value }]
+            | none => []
     | .ifElse cond thenB elseB =>
       let c := lowerExpr cond
       -- No constant folding for non-blocking assigns (posedge always blocks):
@@ -607,11 +637,44 @@ partial def collectRefs : Expr → List String
 def guardedToMux (assigns : List GuardedAssign) (base : Expr) : Expr :=
   assigns.foldl (fun acc ga => .op .mux [ga.guard, ga.value, acc]) base
 
+/-- Gap M (Phase 2 D6-reissue-2, R2 W-free scope): coalesce ≥2 slice /
+    part-select writes to one register under the SAME guard into a single
+    MSB-first `.concat` (slices sorted by `hi` descending → high bits
+    first, matching BitVec `++` append semantics). Full-coverage groups
+    (Adams Bridge butterfly: 4 contiguous part-selects tiling all bits of
+    `uv_o`) → a structurally-faithful `.concat` whose total width equals the
+    register width (elaborates cleanly). Partial-coverage groups
+    intentionally elaborate to a width-mismatch = the deferred **Gap R**
+    surface (R2 decision, `preflight_050_HALT.md` §4) — NOT closed here.
+    Guard first-occurrence order is preserved so `guardedToMux`'s
+    priority-mux fold is unchanged. Bare-NBA / whole-reg / single-slice
+    groups pass through byte-unchanged (fast-path + Gap-R-deferred). -/
+def mergeGuardedSlices (regName : String) (gas : List GuardedAssign)
+    : List GuardedAssign :=
+  let guards := gas.foldl (fun acc ga =>
+    if acc.any (· == ga.guard) then acc else acc ++ [ga.guard]) []
+  guards.flatMap fun g =>
+    let grp := gas.filter (·.guard == g)
+    let sliced := grp.filterMap fun ga => match ga.slice with
+      | some (hi, lo) => some (hi, lo, ga.value)
+      | none          => none
+    match sliced with
+    | []  => grp                  -- no slices under this guard: pass through
+    | [_] => grp                  -- single slice: Gap-R-deferred, unchanged
+    | _   =>                      -- ≥2 slices, same guard: concat-merge
+      let sortedDesc := sliced.toArray.qsort
+        (fun a b => decide (a.1 > b.1)) |>.toList
+      let whole := grp.filter (·.slice.isNone)
+      whole ++ [{ guard := g, target := regName,
+                  value := Expr.concat (sortedDesc.map (fun (_, _, v) => v)),
+                  slice := none }]
+
 /-- Build mux expression for a non-blocking register from full always body. -/
 def stmtsToMuxExpr (regName : String) (stmts : List SVStmt) : Expr :=
   let all := collectGuardedNB stmts
   let filtered := all.filter (·.target == regName)
-  guardedToMux filtered (.ref regName)
+  let merged := mergeGuardedSlices regName filtered
+  guardedToMux merged (.ref regName)
 
 /-- Build mux expression for a blocking combinational signal.
     Base is the first flat assignment (default value). -/
