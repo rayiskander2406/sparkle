@@ -267,7 +267,12 @@ def generateLean (model : SemanticModel) (extraWidths : List (String × Nat) := 
 
   -- nextState function — use register width to fix constant widths
   let regAssigns := model.registers.map fun r =>
-    let fixedExpr := fixConstWidths r.nextExpr r.width allWidths
+    -- Gap O (P2D5): twin of Macro.lean nextState const-fix — generateLean
+    -- string-codegen path. Same defect (reset predicate left at 0#32 vs
+    -- BitVec 1 because fixConstWidths skips mux conditions), same fix; both
+    -- sites patched in the same closure (compose-don't-replace).
+    let fixedExpr :=
+      fixConstWidthsSmart (fixConstWidths r.nextExpr r.width allWidths) allWidths
     s!"    {leanName r.name} := {irExprToLean fixedExpr regWidths inputWidths allWidths "s" "i"}"
   let nextStateFn := "def nextState (s : State) (i : Input) : State :=\n  {\n" ++
     String.intercalate "\n" regAssigns ++

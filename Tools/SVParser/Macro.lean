@@ -66,7 +66,14 @@ elab "verilog!" src:str : command => do
       let regW := model.registers.map fun r => (r.name, r.width)
       let inpW := model.inputs.map fun i => (i.name, i.width)
       let nextFieldStrs := model.registers.map fun r =>
-        let fixedExpr := fixConstWidths r.nextExpr r.width allWidths
+        -- Gap O (P2D5): fixConstWidths fixes data-path consts to the register
+        -- width but does NOT recurse into mux conditions, so the reset
+        -- predicate `.op .eq [reset, .const 0 32]` is left at 32-bit and
+        -- elaborates as 0#32 vs BitVec 1. Compose fixConstWidthsSmart
+        -- (operand-width inference; recurses the mux condition — same
+        -- function already trusted at line 85) to correct it.
+        let fixedExpr :=
+          fixConstWidthsSmart (fixConstWidths r.nextExpr r.width allWidths) allWidths
         let valStr := irExprToLean fixedExpr regW inpW allWidths "s" "i"
         s!"    {leanName r.name} := {valStr}"
       let nextBody := String.intercalate ",\n" nextFieldStrs
