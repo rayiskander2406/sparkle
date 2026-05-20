@@ -1710,6 +1710,40 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
       body := body ++ [.inst modName instName irConns]
     | _ => pure ()
 
+  -- Gap T (Phase 2 D10): sub-module instances whose sub-module is not
+  -- defined in the same `verilog!` compilation unit have their output-
+  -- port-bound wires silently unbound by extractModel (which only matches
+  -- Stmt.register; Stmt.inst falls through). Synthesize a defined-zero
+  -- placeholder for any wire that is referenced as a `.ref` in a Stmt.inst
+  -- conn list but has no existing Stmt.assign in body. This lets downstream
+  -- consumers (especially state registers reading via combinational chains)
+  -- resolve `.ref wire` through inlineAssigns. The placeholder is a
+  -- semantically-conservative zero default — for verification purposes the
+  -- wire is bound to `0` rather than the unknown sub-module behavior; full
+  -- sub-module flattening remains a separate concern (parseAndLowerFlat).
+  let bodySnapshot := body
+  let existingAssignNames : List String := bodySnapshot.filterMap fun s => match s with
+    | .assign n _ => some n
+    | _ => none
+  let wireMap : List (String × Nat) := wires.map fun w => (w.name, w.ty.bitWidth)
+  let mut gapTBindings : List Stmt := []
+  let mut gapTEmitted : List String := []
+  for stmt in bodySnapshot do
+    match stmt with
+    | .inst _ _ conns =>
+      for (_, expr) in conns do
+        match expr with
+        | .ref name =>
+          if (wireMap.any (·.1 == name))
+              && !(existingAssignNames.any (· == name))
+              && !(gapTEmitted.any (· == name)) then
+            let w := (wireMap.find? (·.1 == name)).map (·.2) |>.getD 32
+            gapTBindings := gapTBindings ++ [.assign name (.const 0 w)]
+            gapTEmitted := gapTEmitted ++ [name]
+        | _ => pure ()
+    | _ => pure ()
+  body := body ++ gapTBindings
+
   -- Deduplicate wires
   let mut dedupWires : List Port := []
   let mut seenWireNames : List String := []
