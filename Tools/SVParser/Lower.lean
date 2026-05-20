@@ -268,6 +268,14 @@ def exprToName : SVExpr → Option String
   | .ident name => if isArrayName name then none else some name
   | .index (.ident name) _ => if isArrayName name then none else some name
   | .slice (.ident name) _ _ => some name
+  -- Gap S (Phase 2 D8): partSelect{Plus,Minus} LHS were silently dropped
+  -- (no arm) — `exprToName` returned `none` for `q[b+:w]` writes, so the
+  -- write was not collected into the SSA env (probe_S_09 sub-mode S-γ).
+  -- Treat them as whole-reg name targets (position-discarded, same as
+  -- `.slice` :270); semantic windowed correctness is a separate concern
+  -- (S-β residual, deferred to a follow-up directive).
+  | .partSelectPlus (.ident name) _ _ => if isArrayName name then none else some name
+  | .partSelectMinus (.ident name) _ _ => if isArrayName name then none else some name
   -- Concat LHS handled separately by lowerConcatLhsAssign (needs bit scatter)
   | _ => none
 
@@ -894,7 +902,20 @@ partial def emitSequentialSSA (stmts : List SVStmt)
           if !isArrayName name then
             let idx := match idxExpr with
               | .lit (.decimal _ v) => v | _ => 0
-            let curRef := Expr.ref (seqEnvLookup curEnv name)
+            -- Gap S (Phase 2 D8): on the .star combinational path the FIRST
+            -- bit-index write to `name` must not read the reg's own
+            -- (nonexistent) held value. `.ref name` here would create an
+            -- illegal combinational self-cycle that `inlineAssignsGo`'s
+            -- cycle-cut (Verify.lean:89) later leaves as a symbolic `.ref`
+            -- in any posedge cross-reader's register `nextExpr`, escalating
+            -- to terminal `Unknown identifier`. When `curEnv` has no prior
+            -- SSA wire for `name`, use a `0` base instead — the unwritten
+            -- bits of a combinational reg have no held value, so a defined
+            -- zero default is the correct model. Subsequent writes still
+            -- chain through the SSA wires (no behavioral change).
+            let curRef : Expr := match curEnv.find? (·.1 == name) with
+              | some (_, prev) => .ref prev
+              | none           => .const 0 32
             let rhsExpr := substExprEnv curEnv (lowerExpr rhs)
             let mask := Expr.const (Int.ofNat (1 <<< idx)) 32
             let clearMask := Expr.op .xor [mask, .const (-1) 32]
