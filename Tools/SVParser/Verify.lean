@@ -151,11 +151,21 @@ def leanName (s : String) : String :=
 partial def fixConstWidths (expr : Expr) (targetWidth : Nat)
     (widthEnv : List (String × Nat)) : Expr :=
   match expr with
-  | .const v w => if w == 32 && targetWidth != 32 then .const v targetWidth else expr
+  -- Widen a constant to the target width when it is the default unsized-32
+  -- literal in a non-32 context (first disjunct = the original predicate
+  -- verbatim, preserving every prior narrowing/widening), OR when it is
+  -- narrower than the target (second disjunct = small-width signed/unsigned
+  -- literals such as `1'sb0` → `.const 0 1`, which must widen to the register
+  -- width). The first disjunct keeps `32 → narrower` resizing intact.
+  | .const v w => if (w == 32 && targetWidth != 32) || (w < targetWidth) then .const v targetWidth else expr
   | .op .mux [c, t, e] =>
     .op .mux [c, fixConstWidths t targetWidth widthEnv, fixConstWidths e targetWidth widthEnv]
   | .op op args => .op op (args.map (fixConstWidths · targetWidth widthEnv))
-  | .concat args => .concat (args.map (fixConstWidths · targetWidth widthEnv))
+  -- Thread each element's OWN inferred width (mirroring the `.slice` arm
+  -- below) rather than the parent register width: a concat's elements have
+  -- independent widths summing to the register width, so passing the parent
+  -- width over-widens every slot.
+  | .concat args => .concat (args.map (fun a => fixConstWidths a (inferWidth widthEnv widthEnv a) widthEnv))
   | .slice e hi lo => .slice (fixConstWidths e (hi - lo + 1) widthEnv) hi lo
   | _ => expr
 
