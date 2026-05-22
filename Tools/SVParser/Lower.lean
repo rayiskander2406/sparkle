@@ -673,8 +673,15 @@ def mergeGuardedSlices (regName : String) (gas : List GuardedAssign)
       let sortedDesc := sliced.toArray.qsort
         (fun a b => decide (a.1 > b.1)) |>.toList
       let whole := grp.filter (·.slice.isNone)
+      -- Coerce each merge slot value to its part-select width (hi-lo+1):
+      -- SystemVerilog `reg[hi:lo] <= rhs` resizes rhs to the slice width.
+      -- `Expr.slice v (hi-lo) 0` codegens `BitVec.extractLsb' 0 (hi-lo+1) v`,
+      -- identity when v is already slot-width, truncating when wider, and
+      -- zero-extending when narrower (type-safe). Without it, a slot value
+      -- carrying an over-wide width (e.g. a parametrized wire defaulting to 32)
+      -- yields a concat wider than the target register. (Gap X, Directive 14.)
       whole ++ [{ guard := g, target := regName,
-                  value := Expr.concat (sortedDesc.map (fun (_, _, v) => v)),
+                  value := Expr.concat (sortedDesc.map (fun (hi, lo, v) => Expr.slice v (hi - lo) 0)),
                   slice := none }]
 
 /-- Build mux expression for a non-blocking register from full always body. -/
