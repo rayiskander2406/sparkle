@@ -70,9 +70,78 @@ private partial def rewriteSv2vCasts (input : String) : String := Id.run do
     | [] => cont := false
   out
 
+/-- QANARY (Gap U): last whitespace-delimited token of a string — the port
+    name in a direction declaration such as `input wire [69:0] rnd_i`. -/
+private def lastIdentToken (s : String) : String :=
+  ((s.replace "\t" " ").splitOn " ").filter (· ≠ "") |>.getLastD ""
+
+/-- QANARY (Gap U): fold a Verilog-1995 non-ANSI port list into ANSI form.
+    sv2v 0.0.13 emits `module M (\n  name,\n  ...\n);` with `input`/`output`
+    direction declarations in the module body. Sparkle's `parsePortList`
+    requires the Verilog-2001 ANSI form (direction in the header), so the raw
+    output fails with `expected 'inout'` at the first bare port name. This pass
+    detects a bare-name header port list, collects the matching body direction
+    declarations, rewrites the header to ANSI form, and drops the consumed body
+    declarations. String→string; no AST change. No-op on already-ANSI headers
+    and on input with no foldable module header (idempotent). -/
+private def foldNonAnsiPorts (input : String) : String := Id.run do
+  let lines := (input.splitOn "\n").toArray
+  let n := lines.size
+  -- 1. header-open line: trimmed `module <name> (` ending in '('
+  let mut hOpen : Option Nat := none
+  for i in [0:n] do
+    if hOpen.isNone then
+      let t := lines[i]!.trim
+      if t.startsWith "module " && t.endsWith "(" then hOpen := some i
+  let some ho := hOpen | return input
+  -- 2. port-list close: first subsequent trimmed line starting with ')'
+  let mut hClose : Option Nat := none
+  for j in [ho+1:n] do
+    if hClose.isNone then
+      if (lines[j]!.trim).startsWith ")" then hClose := some j
+  let some hc := hClose | return input
+  -- 3. collect bare header port names; abort (no-op) if already ANSI
+  let mut names : List String := []
+  let mut isAnsi := false
+  for k in [ho+1:hc] do
+    let t0 := lines[k]!.trim
+    let t := if t0.endsWith "," then (t0.dropRight 1).trim else t0
+    if t == "" then pure ()
+    else if t.startsWith "input" || t.startsWith "output" || t.startsWith "inout" then
+      isAnsi := true
+    else names := names ++ [t]
+  if isAnsi || names.isEmpty then return input
+  -- 4. scan body for matching `input/output/inout ... <name>;` declarations
+  let mut declMap : List (String × String) := []
+  let mut consumed : List Nat := []
+  for b in [hc+1:n] do
+    let t := lines[b]!.trim
+    if (t.startsWith "input" || t.startsWith "output" || t.startsWith "inout") && t.endsWith ";" then
+      let decl := (t.dropRight 1).trim
+      let nm := lastIdentToken decl
+      if names.contains nm then
+        declMap := declMap ++ [(nm, decl)]
+        consumed := consumed ++ [b]
+  -- 5. require every header port to have a body direction decl; else no-op
+  if !names.all (fun nm => (declMap.find? (·.1 == nm)).isSome) then return input
+  -- 6. rebuild: header in ANSI port order, then body minus consumed decls
+  let ansiDecls := names.filterMap (fun nm => (declMap.find? (·.1 == nm)).map (·.2))
+  let mut out : List String := []
+  for i in [0:ho+1] do out := out ++ [lines[i]!]
+  let dn := ansiDecls.length
+  for idx in [0:dn] do
+    out := out ++ ["\t" ++ ansiDecls[idx]! ++ (if idx + 1 < dn then "," else "")]
+  out := out ++ [");"]
+  for b in [hc+1:n] do
+    if !consumed.contains b then out := out ++ [lines[b]!]
+  return "\n".intercalate out
+
 /-- Simple preprocessor: remove ifdef blocks (keeping else branch),
     strip `timescale/`define/`default_nettype directives and (* ... *) attributes -/
 def preprocess (input : String) : String := Id.run do
+  -- QANARY (Gap U): fold Verilog-1995 non-ANSI port lists into ANSI form
+  -- before any other transformation, so parsePortList sees direction-in-header.
+  let input := foldNonAnsiPorts input
   -- QANARY: normalize `@(*)` → `@*` BEFORE attribute-stripping. The
   -- `removeAttributes` helper greedily matches `(* ... *)` including
   -- the `(*` inside `@(*)`, which would silently corrupt the always-block
