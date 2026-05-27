@@ -530,8 +530,25 @@ partial def parseStmtList : P (List SVStmt) := do
   match ← attempt (keyword "begin") with
   | some _ =>
     let _ ← attempt (do colon; let _ ← identifier; pure ())
-    let stmts ← many parseStmt
-    keyword "end"; pure stmts.toList
+    -- Gap Y (Track ii): mirror parseAlwaysBody's depth-tracked error-recovery
+    -- loop so a block-local declaration (e.g. sv2v's `reg signed [31:0] i;` loop
+    -- counter) inside an if/case/for branch is skipped rather than hard-failing
+    -- `keyword "end"`. parseStmt has no local-decl arm; the always-body path
+    -- already tolerates this via token-skip recovery — this brings the
+    -- branch-body path (parseStmtList) in line. (CITE: parseAlwaysBody :771.)
+    let mut stmts : List SVStmt := []
+    let mut depth : Nat := 1
+    while depth > 0 do
+      match ← attempt parseStmt with
+      | some s => stmts := stmts ++ [s]
+      | none =>
+        match ← attempt (keyword "end") with
+        | some _ => depth := depth - 1
+        | none =>
+          match ← attempt (keyword "begin") with
+          | some _ => depth := depth + 1
+          | none => let _ ← nextChar
+    pure stmts
   | none =>
     -- Single statement or empty (;)
     match ← attempt semi with
