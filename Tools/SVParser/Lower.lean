@@ -307,6 +307,16 @@ def lhsBaseRange : SVExpr → Option (String × Nat × Nat)
     match svExprToNat base, svExprToNat width with
     | some b, some w => if w == 0 || w > b + 1 then none else some (n, b, (b + 1) - w)
     | _, _ => none
+  -- Gap Z (Track ii D6): single-bit index `q[k]` parses as SVExpr.index (not
+  -- .slice). Tag a constant-index single-bit write as the degenerate slice (k,k)
+  -- so the (reg,guard) merge coalesces ≥2 same-guard single-bit writes exactly
+  -- like range part-selects. Dynamic index (loop var) → svExprToNat none → fall
+  -- through (unrollForLoops literalizes constant-bound loop indices upstream, so
+  -- `for(i) q[i]<=…` collapses to const-index writes before this runs).
+  | .index (.ident n) idx =>
+    match svExprToNat idx with
+    | some k => some (n, k, k)
+    | none   => none
   | _ => none
 
 -- ============================================================================
