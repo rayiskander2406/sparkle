@@ -169,6 +169,17 @@ partial def fixConstWidths (expr : Expr) (targetWidth : Nat)
   | .slice e hi lo => .slice (fixConstWidths e (hi - lo + 1) widthEnv) hi lo
   | _ => expr
 
+/-- Coerce `e` (inferred width `fromW`) up to width `toW` (`toW ≥ fromW`).
+    A const is relabelled; any other expr is zero-extended via
+    `concat [const 0 (toW-fromW), e]` (high-zero ++ value), which `inferWidth`
+    (:136) and `irExprToLean` (:242) already handle. Zero-extension is the
+    correct Verilog widening for unsigned bitwise operands. -/
+def widenExprTo (e : Expr) (fromW toW : Nat) : Expr :=
+  if toW <= fromW then e else
+  match e with
+  | .const v _ => .const v toW
+  | _          => .concat [.const 0 (toW - fromW), e]
+
 /-- Fix constant widths by inferring the correct width from context.
     For binary ops, constants adopt the width of the other operand.
     For mux, constants adopt the width of the then-branch. -/
@@ -199,8 +210,24 @@ partial def fixConstWidthsSmart (expr : Expr) (widthEnv : List (String × Nat)) 
     let wb := inferWidth widthEnv widthEnv b
     let a := if wa == 32 && wb != 32 then match a with | .const v _ => .const v wb | _ => a else a
     let b := if wb == 32 && wa != 32 then match b with | .const v _ => .const v wa | _ => b else b
+    -- gap #2 (narrow-reg-bitwrite): equal-width bitwise ops (and/or/xor) need
+    -- both operands the same width. The const-32 reconcile above cannot fix a
+    -- residual NON-32 mismatch (e.g. a 1-bit bit-select RHS meeting the RMW's
+    -- reg-width-widened 1-bit mask). Equalize by coercing the narrower operand
+    -- to the wider width (const → relabel; non-const → zero-extend via concat).
+    let needsEqWidth := match op with | .and | .or | .xor => true | _ => false
+    let (a, b) :=
+      if needsEqWidth then
+        let wa' := inferWidth widthEnv widthEnv a
+        let wb' := inferWidth widthEnv widthEnv b
+        if wa' < wb' then (widenExprTo a wa' wb', b)
+        else if wb' < wa' then (a, widenExprTo b wb' wa')
+        else (a, b)
+      else (a, b)
     .op op [a, b]
   | .op op args => .op op (args.map (fixConstWidthsSmart · widthEnv))
+  | .slice e hi lo => .slice (fixConstWidthsSmart e widthEnv) hi lo
+  | .concat args => .concat (args.map (fixConstWidthsSmart · widthEnv))
   | _ => expr
 
 /-- Convert IR Expr to a Lean BitVec expression string.
