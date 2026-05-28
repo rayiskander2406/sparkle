@@ -850,6 +850,23 @@ partial def parseGenerateBranchItems : P (List SVModuleItem) := do
     Chained `else if` is represented by nesting: else-body contains another generateBlock. -/
 partial def parseGenerateBlock : P (List SVModuleItem) := do
   -- Already consumed "generate" keyword
+  -- Track (ii) D9: loop_generate_construct dispatch (IEEE 1800-2017 §27.4).
+  -- generate for (gv = lo; gv < limit; gv = gv + inc) begin [: label] <items> end endgenerate
+  if (← attempt (keyword "for")).isSome then
+    lparen
+    let gv ← identifier
+    eqSign
+    let loE ← parseExpr
+    semi
+    let condE ← parseExpr
+    semi
+    let _ ← identifier      -- step LHS (the genvar again); re-parsed, value unused
+    eqSign
+    let stepE ← parseExpr
+    rparen
+    let body ← parseGenerateBranchItems
+    keyword "endgenerate"
+    return [SVModuleItem.generateForLoop gv loE condE stepE body]
   -- Expect: if (COND) begin ... end [else [if (COND) begin ... end]* [begin ... end]] endgenerate
   keyword "if"
   lparen; let cond ← parseExpr; rparen
@@ -874,6 +891,12 @@ partial def parseGenerateBlock : P (List SVModuleItem) := do
   pure [SVModuleItem.generateBlock cond ifItems elseItems]
 
 partial def parseModuleItems : P (List SVModuleItem) := do
+  -- genvar declaration: parse-and-drop. The loop variable is re-bound by the
+  -- generate-for header (parseGenerateBlock `for` arm); the standalone decl
+  -- `genvar i, j;` carries no IR. IEEE 1800-2017 §27.4. Track (ii) D9.
+  if (← attempt (keyword "genvar")).isSome then
+    let _ ← parseMultiNames (SVModuleItem.integerDecl ·)
+    return []
   match ← attempt (keyword "assign") with
   | some _ =>
     let lhs ← parseExpr; eqSign; let rhs ← parseExpr; semi

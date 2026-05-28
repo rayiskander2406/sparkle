@@ -1448,6 +1448,45 @@ partial def expandGenerateBlocks (paramVals : List (String × Nat))
       let selectedItems := if condVal != 0 then ifItems else elseItems
       -- Recursively expand in case of nested generate blocks
       expandGenerateBlocks paramVals selectedItems
+    | .generateForLoop genvar loE condE stepE body =>
+      -- Track (ii) D9: constant-bound single-level loop_generate unroll.
+      -- Evaluate bounds (limit may be a parameter → evalConstExpr w/ paramVals),
+      -- then for each genvar value emit the body with the genvar (and any
+      -- block-local `localparam` aliases) substituted to literals, instance
+      -- names uniquified. Produces the proven-working flattened-instantiation IR.
+      let lo := evalConstExpr paramVals loE |>.getD 0
+      let hi? := match condE with
+        | .binary .lt (.ident v) limE => if v == genvar then evalConstExpr paramVals limE else none
+        | _ => none
+      let inc? := match stepE with
+        | .binary .add (.ident v) incE => if v == genvar then evalConstExpr paramVals incE else none
+        | _ => none
+      match hi?, inc? with
+      | some hi, some inc =>
+        if inc == 0 then [item] else Id.run do
+          let mut out : List SVModuleItem := []
+          let mut j := lo
+          while j < hi do
+            let pv := (genvar, j) :: paramVals
+            let subst : List (String × SVExpr) :=
+              (genvar, SVExpr.lit (.decimal (some 32) j)) ::
+                body.filterMap (fun it => match it with
+                  | .paramDecl p =>
+                    (evalConstExpr pv p.value).map (fun v => (p.name, SVExpr.lit (.decimal (some 32) v)))
+                  | _ => none)
+            let iterItems : List SVModuleItem := body.filterMap (fun it => match it with
+              | .paramDecl _ => none
+              | .instantiation mn inst conns ovr =>
+                some (.instantiation mn s!"{inst}_{j}"
+                       (conns.map (fun (p, e) => (p, substParamExpr subst e)))
+                       (ovr.map (fun (p, e) => (p, substParamExpr subst e))))
+              | .wireDecl n w (some e) => some (.wireDecl n w (some (substParamExpr subst e)))
+              | .contAssign l r => some (.contAssign (substParamExpr subst l) (substParamExpr subst r))
+              | o => some o)
+            out := out ++ expandGenerateBlocks pv iterItems
+            j := j + inc
+          out
+      | _, _ => [item]
     | other => [other]
 
 -- ============================================================================

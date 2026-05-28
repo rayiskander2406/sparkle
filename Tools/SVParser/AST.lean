@@ -115,6 +115,8 @@ inductive SVModuleItem where
   | alwaysBlock   (sensitivity : SVSensitivity) (body : List SVStmt)
   | generateBlock (cond : SVExpr) (body : List SVModuleItem)
                   (elseBody : List SVModuleItem)          -- generate if (...) ... endgenerate
+  | generateForLoop (genvar : String) (initE condE stepE : SVExpr)
+                  (body : List SVModuleItem)              -- generate for (...) ... endgenerate (loop_generate_construct; Track (ii) D9)
   | instantiation (moduleName instName : String)
                   (connections : List (String × SVExpr))
                   (paramOverrides : List (String × SVExpr) := [])
