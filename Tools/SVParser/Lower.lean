@@ -1490,6 +1490,98 @@ partial def expandGenerateBlocks (paramVals : List (String × Nat))
     | other => [other]
 
 -- ============================================================================
+-- Unpacked-array flattening (constant-bound internal arrays → per-element scalars)
+-- ============================================================================
+
+partial def flattenExpr (flat : List String) : SVExpr → SVExpr
+  | .index (.index (.ident name) idx) inner =>
+    if flat.contains name then
+      match svExprToNat idx with
+      | some c => .index (.ident s!"{name}__{c}") (flattenExpr flat inner)
+      | none   => .index (.index (.ident name) (flattenExpr flat idx)) (flattenExpr flat inner)
+    else .index (.index (.ident name) (flattenExpr flat idx)) (flattenExpr flat inner)
+  | .index (.ident name) idx =>
+    if flat.contains name then
+      match svExprToNat idx with
+      | some c => .ident s!"{name}__{c}"
+      | none   => .index (.ident name) (flattenExpr flat idx)
+    else .index (.ident name) (flattenExpr flat idx)
+  | .index a i => .index (flattenExpr flat a) (flattenExpr flat i)
+  | .unary op a => .unary op (flattenExpr flat a)
+  | .binary op a b => .binary op (flattenExpr flat a) (flattenExpr flat b)
+  | .ternary c t e => .ternary (flattenExpr flat c) (flattenExpr flat t) (flattenExpr flat e)
+  | .slice e hi lo => .slice (flattenExpr flat e) hi lo
+  | .partSelectPlus e b w => .partSelectPlus (flattenExpr flat e) (flattenExpr flat b) (flattenExpr flat w)
+  | .partSelectMinus e b w => .partSelectMinus (flattenExpr flat e) (flattenExpr flat b) (flattenExpr flat w)
+  | .concat args => .concat (args.map (flattenExpr flat))
+  | .repeat_ c v => .repeat_ (flattenExpr flat c) (flattenExpr flat v)
+  | e => e
+
+partial def flattenStmt (flat : List String) : SVStmt → SVStmt
+  | .blockAssign l r => .blockAssign (flattenExpr flat l) (flattenExpr flat r)
+  | .nonblockAssign l r => .nonblockAssign (flattenExpr flat l) (flattenExpr flat r)
+  | .ifElse c t e => .ifElse (flattenExpr flat c) (t.map (flattenStmt flat)) (e.map (flattenStmt flat))
+  | .caseStmt sel arms dflt =>
+    .caseStmt (flattenExpr flat sel)
+      (arms.map (fun (ls, b) => (ls.map (flattenExpr flat), b.map (flattenStmt flat))))
+      (dflt.map (fun b => b.map (flattenStmt flat)))
+  | .forLoop i c s b =>
+    .forLoop (flattenStmt flat i) (flattenExpr flat c) (flattenStmt flat s) (b.map (flattenStmt flat))
+  | .assertStmt c => .assertStmt (flattenExpr flat c)
+
+partial def collectFlatIdxE (flat : List String) : SVExpr → List (String × Nat)
+  | .index (.index (.ident name) idx) inner =>
+    (if flat.contains name then (match svExprToNat idx with | some c => [(name, c)] | none => []) else [])
+      ++ collectFlatIdxE flat idx ++ collectFlatIdxE flat inner
+  | .index (.ident name) idx =>
+    (if flat.contains name then (match svExprToNat idx with | some c => [(name, c)] | none => []) else [])
+      ++ collectFlatIdxE flat idx
+  | .index a i => collectFlatIdxE flat a ++ collectFlatIdxE flat i
+  | .unary _ a => collectFlatIdxE flat a
+  | .binary _ a b => collectFlatIdxE flat a ++ collectFlatIdxE flat b
+  | .ternary c t e => collectFlatIdxE flat c ++ collectFlatIdxE flat t ++ collectFlatIdxE flat e
+  | .slice e _ _ => collectFlatIdxE flat e
+  | .partSelectPlus e b w => collectFlatIdxE flat e ++ collectFlatIdxE flat b ++ collectFlatIdxE flat w
+  | .partSelectMinus e b w => collectFlatIdxE flat e ++ collectFlatIdxE flat b ++ collectFlatIdxE flat w
+  | .concat args => args.flatMap (collectFlatIdxE flat)
+  | .repeat_ c v => collectFlatIdxE flat c ++ collectFlatIdxE flat v
+  | _ => []
+
+partial def collectFlatIdxS (flat : List String) : SVStmt → List (String × Nat)
+  | .blockAssign l r => collectFlatIdxE flat l ++ collectFlatIdxE flat r
+  | .nonblockAssign l r => collectFlatIdxE flat l ++ collectFlatIdxE flat r
+  | .ifElse c t e => collectFlatIdxE flat c ++ t.flatMap (collectFlatIdxS flat) ++ e.flatMap (collectFlatIdxS flat)
+  | .caseStmt sel arms dflt =>
+    collectFlatIdxE flat sel
+      ++ arms.flatMap (fun (ls, b) => ls.flatMap (collectFlatIdxE flat) ++ b.flatMap (collectFlatIdxS flat))
+      ++ (dflt.getD []).flatMap (collectFlatIdxS flat)
+  | .forLoop i c s b =>
+    collectFlatIdxS flat i ++ collectFlatIdxE flat c ++ collectFlatIdxS flat s ++ b.flatMap (collectFlatIdxS flat)
+  | .assertStmt c => collectFlatIdxE flat c
+
+def flattenUnpackedArrays (items : List SVModuleItem) : List SVModuleItem :=
+  let flatNames := items.filterMap fun it => match it with
+    | .regDecl name _ (some _) => if isArrayName name then none else some name
+    | _ => none
+  if flatNames.isEmpty then items else
+  let idxPairs : List (String × Nat) := items.flatMap fun it => match it with
+    | .alwaysBlock _ body => body.flatMap (collectFlatIdxS flatNames)
+    | .contAssign l r => collectFlatIdxE flatNames l ++ collectFlatIdxE flatNames r
+    | .instantiation _ _ conns _ => conns.flatMap (fun (_, e) => collectFlatIdxE flatNames e)
+    | _ => []
+  let countOf := fun (nm : String) =>
+    (idxPairs.filterMap (fun (n, c) => if n == nm then some c else none)).foldl Nat.max 0 + 1
+  items.flatMap fun it => match it with
+    | .regDecl name w (some _) =>
+      if isArrayName name then [it]
+      else (List.range (countOf name)).map (fun k => SVModuleItem.regDecl s!"{name}__{k}" w none)
+    | .alwaysBlock sens body => [.alwaysBlock sens (body.map (flattenStmt flatNames))]
+    | .contAssign l r => [.contAssign (flattenExpr flatNames l) (flattenExpr flatNames r)]
+    | .instantiation mn inst conns ovr =>
+      [.instantiation mn inst (conns.map (fun (p, e) => (p, flattenExpr flatNames e))) ovr]
+    | other => [other]
+
+-- ============================================================================
 -- Module lowering
 -- ============================================================================
 
@@ -1507,6 +1599,8 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
   let paramLits : List (String × SVExpr) := paramVals.map fun (n, v) =>
     (n, .lit (.decimal (some 32) v))
   let expandedItems := expandedItems.map (substituteParamsInItem paramLits paramVals)
+  -- Flatten constant-bound internal unpacked arrays to per-element scalars (post-unroll).
+  let expandedItems := flattenUnpackedArrays expandedItems
   -- Also substitute in module-level params
   let svParams := svMod.params.map fun p =>
     match paramVals.find? fun (n, _) => n == p.name with
