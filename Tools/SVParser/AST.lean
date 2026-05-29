@@ -107,8 +107,10 @@ structure SVParam where
 inductive SVModuleItem where
   | wireDecl      (name : String) (width : Option (Nat × Nat))
                   (initExpr : Option SVExpr)              -- wire [w] x = expr;
+                  (widthExpr : Option (SVExpr × SVExpr))  -- deferred param-referencing [hi:lo]; lowerModule re-evals vs paramVals (mirrors SVPort.widthExpr)
   | regDecl       (name : String) (width : Option (Nat × Nat))
                   (arraySize : Option Nat)                -- reg [w] x [0:N];
+                  (widthExpr : Option (SVExpr × SVExpr))  -- deferred param-referencing [hi:lo]; lowerModule re-evals vs paramVals (mirrors SVPort.widthExpr)
   | integerDecl   (name : String)                         -- integer i;
   | paramDecl     (param : SVParam)                       -- parameter/localparam
   | contAssign    (lhs rhs : SVExpr)                      -- assign lhs = rhs;

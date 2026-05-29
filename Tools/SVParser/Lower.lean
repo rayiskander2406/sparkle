@@ -1480,7 +1480,7 @@ partial def expandGenerateBlocks (paramVals : List (String × Nat))
                 some (.instantiation mn s!"{inst}_{j}"
                        (conns.map (fun (p, e) => (p, substParamExpr subst e)))
                        (ovr.map (fun (p, e) => (p, substParamExpr subst e))))
-              | .wireDecl n w (some e) => some (.wireDecl n w (some (substParamExpr subst e)))
+              | .wireDecl n w (some e) we => some (.wireDecl n w (some (substParamExpr subst e)) we)
               | .contAssign l r => some (.contAssign (substParamExpr subst l) (substParamExpr subst r))
               | o => some o)
             out := out ++ expandGenerateBlocks pv iterItems
@@ -1561,7 +1561,7 @@ partial def collectFlatIdxS (flat : List String) : SVStmt → List (String × Na
 
 def flattenUnpackedArrays (items : List SVModuleItem) : List SVModuleItem :=
   let flatNames := items.filterMap fun it => match it with
-    | .regDecl name _ (some _) => if isArrayName name then none else some name
+    | .regDecl name _ (some _) _ => if isArrayName name then none else some name
     | _ => none
   if flatNames.isEmpty then items else
   let idxPairs : List (String × Nat) := items.flatMap fun it => match it with
@@ -1572,9 +1572,9 @@ def flattenUnpackedArrays (items : List SVModuleItem) : List SVModuleItem :=
   let countOf := fun (nm : String) =>
     (idxPairs.filterMap (fun (n, c) => if n == nm then some c else none)).foldl Nat.max 0 + 1
   items.flatMap fun it => match it with
-    | .regDecl name w (some _) =>
+    | .regDecl name w (some _) we =>
       if isArrayName name then [it]
-      else (List.range (countOf name)).map (fun k => SVModuleItem.regDecl s!"{name}__{k}" w none)
+      else (List.range (countOf name)).map (fun k => SVModuleItem.regDecl s!"{name}__{k}" w none we)
     | .alwaysBlock sens body => [.alwaysBlock sens (body.map (flattenStmt flatNames))]
     | .contAssign l r => [.contAssign (flattenExpr flatNames l) (flattenExpr flatNames r)]
     | .instantiation mn inst conns ovr =>
@@ -1622,14 +1622,33 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
       | _, _ => p
   let svMod := { svMod with ports := resolvedPorts }
 
+  -- Gap-B (Track (ii) D17): re-evaluate BODY-decl (wire/reg) widths whose source
+  -- range references parameters. Exact mirror of the port re-eval above:
+  -- parseOptWidthExpr captured the SVExpr `[hi:lo]`; resolve it against folded
+  -- paramVals. Falls back to the existing (placeholder) width when widthExpr is
+  -- absent (back-compat: Lower-synthesized decls pass none) or does not fold.
+  let resolveDeclWidth : Option (SVExpr × SVExpr) → Option (Nat × Nat) → Option (Nat × Nat) :=
+    fun we w => match we with
+      | none => w
+      | some (hiExpr, loExpr) =>
+        match evalConstExpr paramVals hiExpr, evalConstExpr paramVals loExpr with
+        | some hi, some lo => some (hi, lo)
+        | _, _ => w
+  let resolvedItems := svMod.items.map fun item =>
+    match item with
+    | .wireDecl name w init we => .wireDecl name (resolveDeclWidth we w) init we
+    | .regDecl name w arr we => .regDecl name (resolveDeclWidth we w) arr we
+    | _ => item
+  let svMod := { svMod with items := resolvedItems }
+
   -- Build environment
   let mut env := LowerEnv.empty
   for p in svMod.ports do
     env := { env with portWidths := env.portWidths ++ [(p.name, p.width)] }
   for item in svMod.items do
     match item with
-    | .wireDecl name width _ => env := { env with wireWidths := env.wireWidths ++ [(name, width)] }
-    | .regDecl name width _ =>
+    | .wireDecl name width _ _ => env := { env with wireWidths := env.wireWidths ++ [(name, width)] }
+    | .regDecl name width _ _ =>
       env := { env with wireWidths := env.wireWidths ++ [(name, width)],
                          regNames := env.regNames ++ [name] }
     | _ => pure ()
@@ -1643,7 +1662,7 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
 
   -- Collect array register names (memory arrays, not scalar registers)
   let arrayRegNames := svMod.items.filterMap fun item => match item with
-    | .regDecl name _ (some _) => some name
+    | .regDecl name _ (some _) _ => some name
     | _ => none
 
   -- Helper: check if a wire name is already declared
@@ -1654,8 +1673,8 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
   let mut wires : List Port := []
   for item in svMod.items do
     match item with
-    | .wireDecl name width _ => wires := wires ++ [{ name, ty := widthToHWType width }]
-    | .regDecl name width arraySize =>
+    | .wireDecl name width _ _ => wires := wires ++ [{ name, ty := widthToHWType width }]
+    | .regDecl name width arraySize _ =>
       match arraySize with
       | some _ => pure ()  -- Array regs handled by Stmt.memory (not wires)
       | none => wires := wires ++ [{ name, ty := widthToHWType width }]
@@ -1791,10 +1810,10 @@ def lowerModule (svMod : SVModule) (paramOverrides : List (String × Nat) := [])
           if !wireExists wires sigName then
             let sigTy := env.getHWType sigName
             wires := wires ++ [{ name := sigName, ty := sigTy }]
-    | .wireDecl name _ (some initExpr) =>
+    | .wireDecl name _ (some initExpr) _ =>
       -- wire x = expr; → assign
       body := body ++ [.assign name (lowerExpr initExpr)]
-    | .regDecl name width (some arraySize) =>
+    | .regDecl name width (some arraySize) _ =>
       -- Array reg → Stmt.memory for JIT memory access
       -- Do NOT add to wires list — Stmt.memory creates the class member.
       let dataWidth := widthToBits width

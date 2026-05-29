@@ -904,23 +904,29 @@ partial def parseModuleItems : P (List SVModuleItem) := do
   | none => match ← attempt (keyword "wire") with
     | some _ =>
       let _ ← attempt (keyword "signed")
-      let w ← parseOptWidth
+      -- Gap-B: capture the SVExpr form of the bit-range (mirrors 393ce03 for ports)
+      -- so lowerModule can re-evaluate param-referencing widths against paramVals.
+      let widthExpr ← parseOptWidthExpr
+      let w : Option (Nat × Nat) := widthExpr.map (fun _ => (31, 0))
       let n ← identifier
       match ← attempt eqSign with
-      | some _ => let e ← parseExpr; semi; pure [SVModuleItem.wireDecl n w (some e)]
+      | some _ => let e ← parseExpr; semi; pure [SVModuleItem.wireDecl n w (some e) widthExpr]
       | none =>
         -- Check for additional comma-separated names
-        let mut items := [SVModuleItem.wireDecl n w none]
+        let mut items := [SVModuleItem.wireDecl n w none widthExpr]
         let mut cont := true
         while cont do
           match ← attempt comma with
-          | some _ => let n2 ← identifier; items := items ++ [SVModuleItem.wireDecl n2 w none]
+          | some _ => let n2 ← identifier; items := items ++ [SVModuleItem.wireDecl n2 w none widthExpr]
           | none => cont := false
         semi; pure items
     | none => match ← attempt (keyword "reg") with
       | some _ =>
         let _ ← attempt (keyword "signed")
-        let w ← parseOptWidth; let n ← identifier
+        -- Gap-B: capture the SVExpr form of the bit-range (mirrors 393ce03 for ports).
+        let widthExpr ← parseOptWidthExpr
+        let w : Option (Nat × Nat) := widthExpr.map (fun _ => (31, 0))
+        let n ← identifier
         match ← attempt lbracket with
         | some _ =>
           -- Array dimension: try [lo:hi] with numeric values
@@ -942,13 +948,13 @@ partial def parseModuleItems : P (List SVModuleItem) := do
                 | none => let _ ← nextChar; pure ()
             pure 32  -- default
           semi
-          pure [SVModuleItem.regDecl n w (some arrSize)]
+          pure [SVModuleItem.regDecl n w (some arrSize) widthExpr]
         | none =>
           -- Skip optional initializer: reg foo = expr;
           match ← attempt (token (matchStr "=")) with
           | some _ => let _ ← parseExpr; pure ()  -- consume init value
           | none => pure ()
-          let mut items := [SVModuleItem.regDecl n w none]
+          let mut items := [SVModuleItem.regDecl n w none widthExpr]
           let mut cont := true
           while cont do
             match ← attempt comma with
@@ -957,7 +963,7 @@ partial def parseModuleItems : P (List SVModuleItem) := do
               match ← attempt (token (matchStr "=")) with
               | some _ => let _ ← parseExpr; pure ()
               | none => pure ()
-              items := items ++ [SVModuleItem.regDecl n2 w none]
+              items := items ++ [SVModuleItem.regDecl n2 w none widthExpr]
             | none => cont := false
           semi; pure items
       | none => match ← attempt (keyword "integer") with
