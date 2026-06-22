@@ -909,17 +909,43 @@ partial def parseModuleItems : P (List SVModuleItem) := do
       let widthExpr ← parseOptWidthExpr
       let w : Option (Nat × Nat) := widthExpr.map (fun _ => (31, 0))
       let n ← identifier
-      match ← attempt eqSign with
-      | some _ => let e ← parseExpr; semi; pure [SVModuleItem.wireDecl n w (some e) widthExpr]
+      match ← attempt lbracket with
+      | some _ =>
+        -- Unpacked array dimension on a wire → route to regDecl. Sound: state is
+        -- determined by always@(posedge) membership, not the reg/wire keyword, so a
+        -- combinational wire-array lowers combinationally with no spurious state.
+        -- Mirrors the reg-decl arm below. Track (ii) D21 (wire-decl arm parity).
+        let arrSize ← match ← attempt (do
+          let lo ← token digits
+          colon
+          let hi ← token digits
+          rbracket
+          pure (hi.toNat! - lo.toNat! + 1)) with
+        | some size => pure size
+        | none =>
+          -- Parameterized — skip until ]
+          let mut depth : Nat := 1
+          while depth > 0 do
+            match ← attempt rbracket with
+            | some _ => depth := depth - 1
+            | none => match ← attempt lbracket with
+              | some _ => depth := depth + 1
+              | none => let _ ← nextChar; pure ()
+          pure 32  -- default
+        semi
+        pure [SVModuleItem.regDecl n w (some arrSize) widthExpr]
       | none =>
-        -- Check for additional comma-separated names
-        let mut items := [SVModuleItem.wireDecl n w none widthExpr]
-        let mut cont := true
-        while cont do
-          match ← attempt comma with
-          | some _ => let n2 ← identifier; items := items ++ [SVModuleItem.wireDecl n2 w none widthExpr]
-          | none => cont := false
-        semi; pure items
+        match ← attempt eqSign with
+        | some _ => let e ← parseExpr; semi; pure [SVModuleItem.wireDecl n w (some e) widthExpr]
+        | none =>
+          -- Check for additional comma-separated names
+          let mut items := [SVModuleItem.wireDecl n w none widthExpr]
+          let mut cont := true
+          while cont do
+            match ← attempt comma with
+            | some _ => let n2 ← identifier; items := items ++ [SVModuleItem.wireDecl n2 w none widthExpr]
+            | none => cont := false
+          semi; pure items
     | none => match ← attempt (keyword "reg") with
       | some _ =>
         let _ ← attempt (keyword "signed")
