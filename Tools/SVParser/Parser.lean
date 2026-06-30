@@ -227,6 +227,13 @@ where
     result := result.replace "`FORMAL_KEEP" ""
     result
 
+/-- IEEE 1800-2017 §20.8.1 `$clog2(n)` = ⌈log2 n⌉ (the smallest `k` with `2^k ≥ n`),
+    with the standard edge cases `$clog2(0) = $clog2(1) = 0`. Integer algorithm
+    (no floating `log2` — avoids rounding error at exact powers of two, e.g.
+    `$clog2(4) = 2`, `$clog2(4096) = 12`). -/
+def clog2Nat (n : Nat) : Nat :=
+  if n ≤ 1 then 0 else Nat.log2 (n - 1) + 1
+
 -- ============================================================================
 -- Expression parsing (all mutually recursive)
 -- ============================================================================
@@ -488,6 +495,19 @@ partial def parsePrimary : P SVExpr := do
       | .slice _ _ _ => pure (SVExpr.unary .signed arg)
       | .index _ _ => pure (SVExpr.unary .signed arg)
       | _ => pure arg
+    else if name == "clog2" then
+      -- IEEE 1800-2017 §20.8.1: fold $clog2 of a constant argument to its width.
+      -- NOTE: every non-$signed system function previously fell through to the
+      -- `else pure arg` below, silently DROPPING the wrapper — so `$clog2(N)`
+      -- evaluated to `N` (the argument) instead of ⌈log2 N⌉. A `$clog2(...)`-derived
+      -- localparam used as a loop/generate bound therefore unrolled `N` times
+      -- (e.g. `$clog2(12'd3329)` → bound 3329 instead of 12). Fold it correctly
+      -- here; fail loudly on a non-constant argument rather than silently mis-folding.
+      match arg with
+      | .lit (.decimal _ v) => pure (SVExpr.lit (.decimal none (clog2Nat v)))
+      | .lit (.hex _ v)     => pure (SVExpr.lit (.decimal none (clog2Nat v)))
+      | .lit (.binary _ v)  => pure (SVExpr.lit (.decimal none (clog2Nat v)))
+      | _ => fail s!"$clog2 of a non-constant argument is unsupported: {repr arg}"
     else
       pure arg
   | some '\'' =>
