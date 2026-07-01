@@ -75,6 +75,22 @@ private partial def rewriteSv2vCasts (input : String) : String := Id.run do
 private def lastIdentToken (s : String) : String :=
   ((s.replace "\t" " ").splitOn " ").filter (· ≠ "") |>.getLastD ""
 
+/-- QANARY (Gap Tc2): first whitespace-delimited token of a string. -/
+private def firstIdentToken (s : String) : String :=
+  ((s.replace "\t" " ").splitOn " ").filter (· ≠ "") |>.headD ""
+
+/-- QANARY (Gap Tc2): does the trimmed line begin with a direction keyword as a
+    *whole token*? The prior `startsWith "input"` prefix test false-positived on
+    bare port NAMES that merely begin with those letters (e.g. `input_reg`,
+    `output_data`), misclassifying a non-ANSI header as already-ANSI (aborting the
+    fold) and, in the body scan, mis-capturing an assignment such as
+    `output_x = input_reg;` as a port direction declaration. Matching the first
+    whitespace-delimited token exactly against `input`/`output`/`inout`
+    distinguishes the keyword `input wire clk` from the identifier `input_reg`. -/
+private def firstTokenIsDir (s : String) : Bool :=
+  let ft := firstIdentToken s
+  ft == "input" || ft == "output" || ft == "inout"
+
 /-- QANARY (Gap U): fold a Verilog-1995 non-ANSI port list into ANSI form.
     sv2v 0.0.13 emits `module M (\n  name,\n  ...\n);` with `input`/`output`
     direction declarations in the module body. Sparkle's `parsePortList`
@@ -107,7 +123,7 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
     let t0 := lines[k]!.trim
     let t := if t0.endsWith "," then (t0.dropRight 1).trim else t0
     if t == "" then pure ()
-    else if t.startsWith "input" || t.startsWith "output" || t.startsWith "inout" then
+    else if firstTokenIsDir t then
       isAnsi := true
     else names := names ++ [t]
   if isAnsi || names.isEmpty then return input
@@ -116,7 +132,7 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
   let mut consumed : List Nat := []
   for b in [hc+1:n] do
     let t := lines[b]!.trim
-    if (t.startsWith "input" || t.startsWith "output" || t.startsWith "inout") && t.endsWith ";" then
+    if firstTokenIsDir t && t.endsWith ";" then
       let decl := (t.dropRight 1).trim
       let nm := lastIdentToken decl
       if names.contains nm then
