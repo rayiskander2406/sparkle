@@ -100,8 +100,7 @@ private def firstTokenIsDir (s : String) : Bool :=
     declarations, rewrites the header to ANSI form, and drops the consumed body
     declarations. String→string; no AST change. No-op on already-ANSI headers
     and on input with no foldable module header (idempotent). -/
-private def foldNonAnsiPorts (input : String) : String := Id.run do
-  let lines := (input.splitOn "\n").toArray
+private def foldNonAnsiPortsUnit (lines : Array String) : Array String := Id.run do
   let n := lines.size
   -- 1. header-open line: trimmed `module <name> (` ending in '('
   let mut hOpen : Option Nat := none
@@ -109,13 +108,13 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
     if hOpen.isNone then
       let t := lines[i]!.trim
       if t.startsWith "module " && t.endsWith "(" then hOpen := some i
-  let some ho := hOpen | return input
+  let some ho := hOpen | return lines
   -- 2. port-list close: first subsequent trimmed line starting with ')'
   let mut hClose : Option Nat := none
   for j in [ho+1:n] do
     if hClose.isNone then
       if (lines[j]!.trim).startsWith ")" then hClose := some j
-  let some hc := hClose | return input
+  let some hc := hClose | return lines
   -- 3. collect bare header port names; abort (no-op) if already ANSI
   let mut names : List String := []
   let mut isAnsi := false
@@ -126,7 +125,7 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
     else if firstTokenIsDir t then
       isAnsi := true
     else names := names ++ [t]
-  if isAnsi || names.isEmpty then return input
+  if isAnsi || names.isEmpty then return lines
   -- 4. scan body for matching `input/output/inout ... <name>;` declarations
   let mut declMap : List (String × String) := []
   let mut consumed : List Nat := []
@@ -139,7 +138,7 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
         declMap := declMap ++ [(nm, decl)]
         consumed := consumed ++ [b]
   -- 5. require every header port to have a body direction decl; else no-op
-  if !names.all (fun nm => (declMap.find? (·.1 == nm)).isSome) then return input
+  if !names.all (fun nm => (declMap.find? (·.1 == nm)).isSome) then return lines
   -- 6. rebuild: header in ANSI port order, then body minus consumed decls
   let ansiDecls := names.filterMap (fun nm => (declMap.find? (·.1 == nm)).map (·.2))
   let mut out : List String := []
@@ -150,7 +149,37 @@ private def foldNonAnsiPorts (input : String) : String := Id.run do
   out := out ++ [");"]
   for b in [hc+1:n] do
     if !consumed.contains b then out := out ++ [lines[b]!]
-  return "\n".intercalate out
+  return out.toArray
+
+/-- QANARY (Gap Tc1): split `lines` into per-module chunks, each ending at (and
+    including) its `endmodule` line; any trailing lines form a final chunk. This
+    bounds each fold's header-search AND body-scan to a single module. Previously
+    `foldNonAnsiPorts` folded only the first `module (` header and let its body
+    scan run to EOF, so a multi-module file left modules 2..N's non-ANSI headers
+    unfolded (→ `parsePortList` fails → `many1 parseModule` silently truncates to
+    the first module) and could even consume a later module's matching-named
+    direction declaration. -/
+private def splitModuleChunks (lines : Array String) : Array (Array String) := Id.run do
+  let mut chunks : Array (Array String) := #[]
+  let mut cur : Array String := #[]
+  for ln in lines do
+    cur := cur.push ln
+    let te := ln.trim
+    if te == "endmodule" || te.startsWith "endmodule " || te.startsWith "endmodule:"
+        || te.startsWith "endmodule/" then
+      chunks := chunks.push cur
+      cur := #[]
+  if cur.size > 0 then chunks := chunks.push cur
+  pure chunks
+
+/-- QANARY (Gap Tc1): fold non-ANSI port lists in EVERY module of a (possibly
+    multi-module) input, by folding each `module…endmodule` chunk independently.
+    A single-module input is a single chunk, so single-module behavior (including
+    the Gap-U / Gap-Tc2 folds) is unchanged. String→string; no AST change. -/
+private def foldNonAnsiPorts (input : String) : String :=
+  let lines := (input.splitOn "\n").toArray
+  let folded := (splitModuleChunks lines).map foldNonAnsiPortsUnit |>.foldl (· ++ ·) (#[] : Array String)
+  "\n".intercalate folded.toList
 
 /-- Simple preprocessor: remove ifdef blocks (keeping else branch),
     strip `timescale/`define/`default_nettype directives and (* ... *) attributes -/
