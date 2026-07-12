@@ -2292,8 +2292,25 @@ def parseAndLowerFlat (input : String) : Except String Design := do
       let enriched := { result with modules := result.modules ++ design.modules }
       result := flattenDesign enriched svDesign
     else break
+  -- Gap-Tc3: drop Gap-T `const 0` placeholders shadowed by a real composed driver.
+  -- `lowerModule` emits a per-module `const 0` for a sub-module instance's output-bound
+  -- wire that has no driver in that module's own body; `flattenDesign` then also adds
+  -- the REAL driver for that wire once the sub-module is inlined. Both assignments
+  -- survive the flatten and the placeholder can win. For any signal that has BOTH a
+  -- whole-`const 0` assignment and a non-`const 0` assignment, drop the placeholder so
+  -- the composed value survives. A signal with ONLY a `const 0` assignment (a genuinely
+  -- unbound / legitimately-stubbed wire) is left untouched — no over-suppression.
+  let isZeroConst : Expr → Bool := fun e => match e with | .const 0 _ => true | _ => false
+  let deshadowed : Design :=
+    { result with modules := result.modules.map fun m =>
+        let realDriven := m.body.filterMap fun s =>
+          match s with | .assign l r => if isZeroConst r then none else some l | _ => none
+        { m with body := m.body.filter fun s =>
+            match s with
+            | .assign l r => !(isZeroConst r && realDriven.contains l)
+            | _ => true } }
   -- Generic reachability DCE: remove unreachable wires/registers
-  let stripped := reachabilityDCE result
+  let stripped := reachabilityDCE deshadowed
   -- Optimize: constant folding, DCE, single-use wire inlining
   let optimized := Sparkle.IR.Optimize.optimizeDesign stripped
   pure optimized
